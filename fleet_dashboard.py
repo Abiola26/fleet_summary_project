@@ -1,21 +1,16 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
+from openpyxl import load_workbook
 
-st.set_page_config(page_title="Fleet Summary Tool", layout="centered")
-st.title("🚚 Fleet Summary Tool")
-
-st.sidebar.header("Select Functionality")
-option = st.sidebar.radio("Choose an option:", ["📁 CSV Summary & Subtotals", "📂 Combine Multiple Excel Files"])
-
-# ========== FUNCTION TO FORMAT & EXPORT EXCEL ========== #
-def style_and_export_to_excel(df):
+# ---------------------------------------------------------
+# 🔹 EXCEL STYLING + EXPORT FUNCTION
+# ---------------------------------------------------------
+def style_and_export_to_excel(df, sheet_name="Summary"):
     output = BytesIO()
-    df.to_excel(output, index=False, sheet_name='Summary')
-    
-    # Load workbook for styling
+    df.to_excel(output, index=False, sheet_name=sheet_name)
+
     wb = load_workbook(output)
     ws = wb.active
 
@@ -28,115 +23,174 @@ def style_and_export_to_excel(df):
 
     # Bold subtotal rows
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-        if row[1].value == "Subtotal":
+        if row[1].value == "Subtotal" or row[1].value == "Grand Total":
             for cell in row:
                 cell.font = Font(bold=True)
 
-    # Format amount column
+    # Format ₦ columns
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-        cell = row[3]  # 'Total Amount (₦)' is column index 3 (zero-based)
-        if isinstance(cell.value, (int, float)):
-            cell.number_format = '"₦"#,##0.00'
+        for cell in row:
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '"₦"#,##0.00'
 
-    # Save styled Excel to BytesIO
     final_output = BytesIO()
     wb.save(final_output)
     return final_output.getvalue()
 
-# ========== FUNCTION 1: CSV File Upload and Summary ========== #
-if option == "📁 CSV Summary & Subtotals":
-    st.subheader("📥 Upload CSV File")
-    csv_file = st.file_uploader("Upload a CSV file", type=["csv"], key="csv")
 
-    if csv_file:
-        try:
-            df = pd.read_csv(csv_file)
-            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-            df['OnlyDate'] = df['Date'].dt.date
-            df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
 
-            grouped = df.groupby(['OnlyDate', 'Fleet']).agg(
-                TotalAmount=('Amount', 'sum'),
-                FleetCount=('Fleet', 'count')
-            ).reset_index()
+# ---------------------------------------------------------
+# 🔹 COMBINED SUPER-MODULE (Uploads CSV + Excel)
+# ---------------------------------------------------------
+def process_uploaded_files(uploaded_files):
+    REQUIRED_COLS = ["Date", "Fleet", "Amount"]
+    all_dfs = []
 
-            # Build formatted DataFrame
-            formatted_rows = []
-            for date, group in grouped.groupby('OnlyDate'):
-                subtotal_amount = group['TotalAmount'].sum()
-                subtotal_count = group['FleetCount'].sum()
+    progress = st.progress(0)
+    status_text = st.empty()
 
-                for _, row in group.iterrows():
-                    formatted_rows.append({
-                        "Date": row['OnlyDate'],
-                        "Fleet": row['Fleet'],
-                        "Fleet Count": row['FleetCount'],
-                        "Total Amount (₦)": f"{row['TotalAmount']:,.2f}"
-                    })
+    for i, file in enumerate(uploaded_files):
+        file_name = file.name.lower()
 
-                formatted_rows.append({
-                    "Date": date,
-                    "Fleet": "Subtotal",
-                    "Fleet Count": subtotal_count,
-                    "Total Amount (₦)": f"{subtotal_amount:,.2f}"
-                })
+        status_text.write(f"📄 Reading file: **{file.name}** ...")
 
-            result_df = pd.DataFrame(formatted_rows)
-            st.success("✅ CSV processed successfully!")
-            st.dataframe(result_df)
+        # CSV
+        if file_name.endswith(".csv"):
+            df = pd.read_csv(file)
 
-            # Download button
-            styled_excel = style_and_export_to_excel(result_df)
-            st.download_button(
-                label="📥 Download Summary as Excel",
-                data=styled_excel,
-                file_name="Fleet_Summary_Subtotal.xlsx",
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
-        except Exception as e:
-            st.error(f"❌ Error processing CSV: {e}")
-
-# ========== FUNCTION 2: Combine Multiple Excel Files ========== #
-elif option == "📂 Combine Multiple Excel Files":
-    st.subheader("📥 Upload Excel Files")
-    uploaded_files = st.file_uploader("Upload multiple Excel files", type=["xlsx"], accept_multiple_files=True, key="excel")
-
-    if uploaded_files:
-        all_dataframes = []
-
-        for file in uploaded_files:
+        # Excel (auto sheet detection)
+        elif file_name.endswith(".xlsx"):
             try:
-                df = pd.read_excel(file, sheet_name='Sheet1')
-                df['Fleet Count'] = pd.to_numeric(df['Fleet Count'], errors='coerce')
-                df['Total Amount (₦)'] = pd.to_numeric(df['Total Amount (₦)'], errors='coerce')
-                df['Fleet'] = df['Fleet'].astype(str)
-                all_dataframes.append(df)
-            except Exception as e:
-                st.error(f"❌ Error in file `{file.name}`: {e}")
+                excel_file = pd.ExcelFile(file)
+                sheet = excel_file.sheet_names[0]
+                df = pd.read_excel(file, sheet_name=sheet)
+            except:
+                st.error(f"❌ Could not read sheet in `{file.name}`")
+                continue
 
-        if all_dataframes:
-            combined_df = pd.concat(all_dataframes, ignore_index=True)
+        else:
+            st.warning(f"⚠️ Skipped unsupported file: {file.name}")
+            continue
 
-            summary = combined_df.groupby('Fleet').agg({
-                'Fleet Count': 'sum',
-                'Total Amount (₦)': 'sum'
-            }).reset_index().sort_values(by='Fleet')
+        # Validate Columns
+        missing = [c for c in REQUIRED_COLS if c not in df.columns]
+        if missing:
+            st.error(f"❌ `{file.name}` missing columns: {missing}")
+            continue
 
-            st.success("✅ Files combined and summarized successfully!")
-            st.subheader("🚛 Combined Fleet Summary")
-            st.dataframe(summary)
+        # Standardize Format
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["OnlyDate"] = df["Date"].dt.date
+        df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
+        df["Fleet"] = df["Fleet"].astype(str)
 
-            @st.cache_data
-            def convert_df_to_excel(dataframe):
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    dataframe.to_excel(writer, index=False, sheet_name='FleetSummary')
-                return output.getvalue()
+        all_dfs.append(df)
 
-            excel_data = convert_df_to_excel(summary)
-            st.download_button(
-                label="📥 Download Combined Summary as Excel",
-                data=excel_data,
-                file_name='Combined_Fleet_Summary.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
+        progress.progress((i + 1) / len(uploaded_files))
+
+    status_text.write("✅ All files processed.")
+    return all_dfs
+
+
+
+# ---------------------------------------------------------
+# 🔹 STREAMLIT APP UI — UNIFIED FUNCTION
+# ---------------------------------------------------------
+st.header("📊 Fleet Summary & Subtotals — Unified Processor")
+
+uploaded_files = st.file_uploader(
+    "Upload CSV or Excel files",
+    type=["csv", "xlsx"],
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    dfs = process_uploaded_files(uploaded_files)
+
+    if not dfs:
+        st.stop()
+
+    df = pd.concat(dfs, ignore_index=True)
+
+    # ------------------ FILTER SECTION -------------------
+    st.subheader("🔍 Filters")
+
+    min_date, max_date = df["OnlyDate"].min(), df["OnlyDate"].max()
+    date_range = st.date_input("Select Date Range", value=[min_date, max_date])
+
+    if len(date_range) == 2:
+        df = df[(df["OnlyDate"] >= date_range[0]) & (df["OnlyDate"] <= date_range[1])]
+
+    fleet_filter = st.multiselect("Select Fleets", options=sorted(df["Fleet"].unique()))
+    if fleet_filter:
+        df = df[df["Fleet"].isin(fleet_filter)]
+    # -------------------------------------------------------
+
+    # ------------------ SUBTOTAL SECTION -------------------
+    st.subheader("📌 Daily Subtotals")
+
+    grouped = df.groupby(["OnlyDate", "Fleet"]).agg(
+        TotalAmount=("Amount", "sum"),
+        FleetCount=("Fleet", "count")
+    ).reset_index()
+
+    formatted_rows = []
+    for date, group in grouped.groupby("OnlyDate"):
+        sub_amt = group["TotalAmount"].sum()
+        sub_cnt = group["FleetCount"].sum()
+
+        for _, row in group.iterrows():
+            formatted_rows.append({
+                "Date": row["OnlyDate"],
+                "Fleet": row["Fleet"],
+                "Fleet Count": row["FleetCount"],
+                "Total Amount (₦)": row["TotalAmount"]
+            })
+
+        # Subtotal Row
+        formatted_rows.append({
+            "Date": date,
+            "Fleet": "Subtotal",
+            "Fleet Count": sub_cnt,
+            "Total Amount (₦)": sub_amt
+        })
+
+    subtotal_df = pd.DataFrame(formatted_rows)
+    st.dataframe(subtotal_df)
+
+    # ------------------ FLEET SUMMARY -------------------
+    st.subheader("🚛 Fleet Summary (Combined Totals)")
+
+    fleet_summary = df.groupby("Fleet").agg(
+        TotalFleetCount=("Fleet", "count"),
+        TotalAmount=("Amount", "sum")
+    ).reset_index()
+
+    # Add Grand Total Row
+    fleet_summary.loc[len(fleet_summary)] = [
+        "Grand Total",
+        fleet_summary["TotalFleetCount"].sum(),
+        fleet_summary["TotalAmount"].sum()
+    ]
+
+    st.dataframe(fleet_summary)
+
+    # ------------------ DOWNLOADS -------------------
+    st.subheader("⬇️ Export Results")
+
+    styled_subtotal = style_and_export_to_excel(subtotal_df, "Daily_Subtotals")
+    styled_fleet = style_and_export_to_excel(fleet_summary, "Fleet_Summary")
+
+    st.download_button(
+        "📥 Download Daily Subtotal Excel",
+        styled_subtotal,
+        "Daily_Subtotals.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    st.download_button(
+        "📥 Download Fleet Summary Excel",
+        styled_fleet,
+        "Fleet_Summary.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
