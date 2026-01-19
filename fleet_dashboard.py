@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 def style_and_export_to_excel(df, sheet_name="Summary"):
     output = BytesIO()
     df.to_excel(output, index=False, sheet_name=sheet_name)
+    output.seek(0)  # Reset pointer to beginning of stream
 
     wb = load_workbook(output)
     ws = wb.active
